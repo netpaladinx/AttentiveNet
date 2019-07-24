@@ -1,0 +1,43 @@
+name: anet_small_ws_1234
+seed: 1234
+graph:
+  - _stage: 0
+    type: input
+    n_channels: 39
+  - _stage: 1
+    type: singleton
+    n_channels: 78
+    transform: transform_relu_sepconv_bn
+  - _stage: 2
+    type: randomly_wired
+    n_channels: 78
+    transform: transform_relu_sepconv_bn
+    attend: attend_avgpool_fc_dot
+    a2w: a2w_identity
+    n_internal_nodes: 32
+    rw_graph: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+  - _stage: 3
+    type: randomly_wired
+    n_channels: 156
+    transform: transform_relu_sepconv_bn
+    attend: attend_avgpool_fc_dot
+    a2w: a2w_identity
+    n_internal_nodes: 32
+    rw_graph: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+  - _stage: 4
+    type: randomly_wired
+    n_channels: 312
+    transform: transform_relu_sepconv_bn
+    attend: attend_avgpool_fc_dot
+    a2w: a2w_identity
+    n_internal_nodes: 32
+    rw_graph: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+  - _stage: 5
+    type: output
+    n_channels: 1280

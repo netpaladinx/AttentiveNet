@@ -1,0 +1,71 @@
+name: anet_small_ws_v1_1234
+seed: 1234
+graph:
+  - _stage: 0
+    type: singleton
+    in_channels: 3
+    out_channels: 39
+    kernel_size: 3
+    stride: 2
+    transform: transform_input
+  - _stage: 1
+    type: singleton
+    in_channels: 39
+    out_channels: 78
+    kernel_size: 3
+    stride: 2
+    transform: transform_relu_sepconv_bn
+  - _stage: 2
+    type: singleton
+    in_channels: 78
+    out_channels: 78
+    kernel_size: 3
+    stride: 2
+    transform: transform_relu_sepconv_bn
+  - _stage: 3
+    type: randomly_wired
+    n_internal_nodes: 32
+    rw_graph: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+    in_channels: 78
+    out_channels: 156
+    in_kernel_size: 3
+    in_stride: 1
+    out_kernel_size: 3
+    out_stride: 2
+    transform: transform_relu_sepconv_bn
+    attend: attend_relu_conv_bn_relu_avgpool_dot
+  - _stage: 4
+    type: randomly_wired
+    n_internal_nodes: 32
+    rw_graph: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+    in_channels: 156
+    out_channels: 312
+    in_kernel_size: 3
+    in_stride: 1
+    out_kernel_size: 3
+    out_stride: 2
+    transform: transform_relu_sepconv_bn
+    attend: attend_relu_conv_bn_relu_avgpool_dot
+  - _stage: 5
+    type: randomly_wired
+    n_internal_nodes: 32
+    rw_graph: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+    in_channels: 312
+    out_channels: 1280
+    in_kernel_size: 3
+    in_stride: 1
+    out_kernel_size: 1
+    out_stride: 1
+    transform: transform_relu_sepconv_bn
+    attend: attend_relu_conv_bn_relu_avgpool_dot
+  - _stage: 6
+    type: singleton
+    in_channels: 1280
+    out_channels: 1001
+    transform: transform_output

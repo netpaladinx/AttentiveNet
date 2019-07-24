@@ -1,0 +1,26 @@
+data_dir: '../data/imagenet'
+model_dir: '../checkpoints'
+log_dir: '../log'
+n_classes: 1001
+n_channels: 3
+image_size: 224
+n_train_images: 1281167
+n_valid_images: 50000
+n_data_loading_workers: 24
+fp16: True
+epochs: 100
+per_replica_batch_size: 256
+initial_learning_rate: 0.1
+lr_milestones: [30, 60, 80, 90]
+lr_decay_rate: 0.1
+lr_warmup_epochs: 5
+lr_factor_min: 0.0001
+momentum: 0.9
+weight_decay: 0.0001
+label_smoothing: 0.1
+dist_url: 'tcp://127.0.0.1:23456'
+dist_backend: 'nccl'
+print_freq: 20
+resume: ''
+start_epoch: 0
+evaluate: False

@@ -1,0 +1,39 @@
+name: rwnn_small_ws_1234
+seed: 1234
+graph:
+  - _stage: 0
+    unit: input_unit
+    n_channels: 39
+    n_nodes: 1
+    graph_model: point
+  - _stage: 1
+    unit: triple_unit
+    n_channels: 78
+    n_nodes: 1
+    graph_model: point
+  - _stage: 2
+    unit: triple_unit
+    n_channels: 78
+    n_nodes: 32
+    graph_model: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+  - _stage: 3
+    unit: triple_unit
+    n_channels: 156
+    n_nodes: 32
+    graph_model: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+  - _stage: 4
+    unit: triple_unit
+    n_channels: 312
+    n_nodes: 32
+    graph_model: watts_strogatz
+    ws_k: 4
+    ws_p: 0.75
+  - _stage: 5
+    unit: output_unit
+    n_channels: 1280
+    n_nodes: 1
+    graph_model: point
