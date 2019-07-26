@@ -76,7 +76,6 @@ def set_hparams(hparams):
 
     hparams.attend_k = 5
     hparams.attend_epsilon = 0.0
-    hparams.node_emb_dims = 8
     hparams.nn_centering_mode = 'edgewise'
     hparams.nn_affine_mode = 'edgewise'
     hparams.debug = True

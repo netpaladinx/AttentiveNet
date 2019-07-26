@@ -127,7 +127,7 @@ attend_ = Attend_
 
 
 class RandomlyWiredStage(nn.Module):
-    def __init__(self, stage_graph, attend_k, attend_epsilon, node_emb_dims, device, dtype,
+    def __init__(self, stage_graph, attend_k, attend_epsilon, device, dtype,
                  nn_affine_mode, nn_centering_mode, print_freq, debug):
         ''' nn_affine_mode: None, 'nodewise', or 'edgewise'
             nn_centering_mode: None, 'node_wise', or 'edgewise'
@@ -136,7 +136,6 @@ class RandomlyWiredStage(nn.Module):
         self.sg = stage_graph
         self.k = attend_k
         self.epsilon = attend_epsilon
-        self.emb_dims = node_emb_dims
         self.device = device
         self.dtype = dtype
         self.debugger = StageDebugger(self.sg, eg_ids=(0,), print_freq=print_freq) if debug else None
@@ -363,18 +362,19 @@ class SingletonStage(nn.Module):
 
 
 class ANet(nn.Module):
-    def __init__(self, graph, attend_k, attend_epsilon, node_emb_dims, device, dtype,
+    def __init__(self, graph, attend_k, attend_epsilon, device, dtype,
                  nn_affine_mode, nn_centering_mode, print_freq, debug):
         super(ANet, self).__init__()
         self.graph = ANetGraph(graph)
         self.debug = debug
+        self.dtype = dtype
 
         stages = []
         for i, stage_graph in enumerate(self.graph.stage_graphs):
             if stage_graph.type == 'singleton':
                 stage = SingletonStage(stage_graph)
             elif stage_graph.type == 'randomly_wired':
-                stage = RandomlyWiredStage(stage_graph, attend_k, attend_epsilon, node_emb_dims, device, dtype,
+                stage = RandomlyWiredStage(stage_graph, attend_k, attend_epsilon, device, dtype,
                                            nn_affine_mode, nn_centering_mode, print_freq, debug)
             else:
                 raise ValueError('Invalid `stage_graph.type`')
@@ -405,7 +405,8 @@ class ANet(nn.Module):
                     bs, r_mean, r_std, r_usage = batch_reduce(bs,
                                                               stage.nn_running_mean,
                                                               stage.nn_running_std,
-                                                              stage.node_running_usage)
+                                                              stage.node_running_usage,
+                                                              dtype=self.dtype)
                     stage.nn_running_mean.copy_(r_mean)
                     stage.nn_running_std.copy_(r_std)
                     stage.node_running_usage.copy_(r_usage)
@@ -428,7 +429,6 @@ def anet_small_ws_v1(hparams, use_cuda=False, use_fp16=False):
     return ANet('anet_small_ws_v1_1234',
                 hparams.attend_k,
                 hparams.attend_epsilon,
-                hparams.node_emb_dims,
                 device,
                 dtype,
                 hparams.nn_affine_mode,
