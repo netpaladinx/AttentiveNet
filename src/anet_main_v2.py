@@ -8,7 +8,7 @@ import torch.optim as optim
 import torch.multiprocessing as mp
 import torch.distributed as dist
 
-import anet_models_v1 as models
+import anet_models_v2 as models
 from imagenet_dataset import get_train_loader, get_val_loader
 from utils import clean_dirs
 from utils.hyperparameters import HParams

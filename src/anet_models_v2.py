@@ -4,13 +4,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from anet_graphs_v1 import ANetGraph
-from anet_debugger_v1 import StageDebugger
+from anet_graphs_v2 import ANetGraph
+from anet_debugger_v2 import StageDebugger
 from utils.dist import batch_reduce
+
 
 BN_MOMENTUM = 0.01
 NN_MOMENTUM = 0.1
-NN_EPSILON = 1e-5
+NN_EPSILON = 1e-2
+CHANNELS_PER_GROUP = 39
 
 
 def separable_conv2d(in_planes, out_planes, kernel_size, stride):
@@ -83,44 +85,45 @@ class Transform_ReluSepconvBn(nn.Module):
 class Transform_ReluSepconvGn(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride):
         super(Transform_ReluSepconvGn, self).__init__()
-        channels_per_group = 16
-        n_groups = (out_channels + channels_per_group - 1) // channels_per_group
+        n_groups = (out_channels + CHANNELS_PER_GROUP - 1) // CHANNELS_PER_GROUP
         self.conv = separable_conv2d(in_channels, out_channels, kernel_size, stride)
         self.gn = nn.GroupNorm(n_groups, out_channels)
 
     def forward(self, x):
         out = F.relu(x)
         out = self.conv(out)
-        out = self.bn(out)
+        out = self.gn(out)
         return out
 
 
 transform_input = Transform_Input
 transform_output = Transform_Output
 transform_relu_sepconv_bn = Transform_ReluSepconvBn
-transofrm_relu_sepconv_gn = Transform_ReluSepconvGn
+transform_relu_sepconv_gn = Transform_ReluSepconvGn
 
 
 # Classes of attend ops
-class Attend_ReluConvBnReluAvgpoolDot(nn.Module):
-    def __init__(self, n_channels, emb_dims):
-        super(Attend_ReluConvBnReluAvgpoolDot, self).__init__()
-        self.conv = conv2d(n_channels, emb_dims, 1, 1)
-        self.bn = nn.BatchNorm2d(emb_dims, momentum=BN_MOMENTUM)
+class Attend_(nn.Module):
+    def __init__(self, n_channels, n_tar_nd):
+        super(Attend_, self).__init__()
+        n_dims = 8
+        n_groups = 1
+        self.conv = conv2d(n_channels, n_dims, 1, 1)
+        self.gn = nn.GroupNorm(n_groups, n_dims)
+        self.fc = nn.Linear(n_dims, n_tar_nd)
 
-    def forward(self, src_feat, tar_embs):
+    def forward(self, src_feat):
         feat = F.relu(src_feat)
         feat = self.conv(feat)
-        feat = self.bn(feat)
-
+        feat = self.gn(feat)
         feat = F.relu(feat)
         feat = F.adaptive_avg_pool2d(feat, (1, 1))
-        src_emb = feat.view(feat.size(0), -1)  # subbat_size x emb_dims
-        scores = torch.mm(src_emb, tar_embs.t())  # subbat_size x n_tar_nds
-        return scores, src_emb
+        feat = feat.view(feat.size(0), -1)  # subbat_size x n_dims
+        scores = self.fc(feat)  # subbat_size x n_tar_nds
+        return scores
 
 
-attend_relu_conv_bn_relu_avgpool_dot = Attend_ReluConvBnReluAvgpoolDot
+attend_ = Attend_
 
 
 class RandomlyWiredStage(nn.Module):
@@ -143,8 +146,6 @@ class RandomlyWiredStage(nn.Module):
         self.e2vv = [(src_nd.id, tar_id) for src_nd in self.sg.nodes for tar_id in src_nd.out_nei_ids]
         self.vv2e = {vv: i for i, vv in enumerate(self.e2vv)}
 
-        self.node_embs = nn.Parameter(torch.randn(self.sg.n_nodes, self.emb_dims))
-
         if nn_affine_mode == 'nodewise':
             self.nn_gamma = nn.Parameter(torch.ones(self.sg.n_nodes))
             self.nn_beta = nn.Parameter(torch.zeros(self.sg.n_nodes))
@@ -154,10 +155,10 @@ class RandomlyWiredStage(nn.Module):
 
         if nn_centering_mode == 'nodewise':
             self.register_buffer('nn_running_mean', torch.zeros(self.sg.n_nodes))
-            self.register_buffer('nn_running_var', torch.ones(self.sg.n_nodes))
+            self.register_buffer('nn_running_std', torch.ones(self.sg.n_nodes))
         elif nn_centering_mode == 'edgewise':
             self.register_buffer('nn_running_mean', torch.zeros(len(self.vv2e)))
-            self.register_buffer('nn_running_var', torch.ones(len(self.vv2e)))
+            self.register_buffer('nn_running_std', torch.ones(len(self.vv2e)))
 
         self.register_buffer('node_running_usage', torch.zeros(self.sg.n_nodes))
 
@@ -168,7 +169,8 @@ class RandomlyWiredStage(nn.Module):
             self._create_transform_ops(self.sg.nodes, transform_cls,
                                        self.sg.in_channels, self.sg.in_kernel_size, self.sg.in_stride,
                                        self.sg.out_channels, self.sg.out_kernel_size, self.sg.out_stride))
-        self.attend_op = attend_cls(self.sg.in_channels, self.emb_dims)
+        self.attend_op = nn.ModuleList(
+            self._create_attend_ops(self.sg.nodes, attend_cls, self.sg.in_channels))
 
     def forward(self, x):
         self.debugger and self.debugger.before_forward()
@@ -203,13 +205,14 @@ class RandomlyWiredStage(nn.Module):
             aggr_x, subbat_idx = self._aggregate_node_inputs(node_outs, node_attns, trans_mask[node.id], batch_size)
             if aggr_x is None:
                 continue
+            aggr_x = aggr_x / node.n_in_neis
 
             node_usage[node.id] = subbat_idx.size(0) / batch_size
             self.debugger and self.debugger.after_node_aggregate_op(
                 node, subbat_idx, node_attns[node.id], trans_mask[node.id], batch_size)
 
             if node.is_master_output:
-                stage_out = aggr_x / node.n_in_neis
+                stage_out = aggr_x
                 assert stage_out.size(0) == batch_size
                 break
 
@@ -237,9 +240,8 @@ class RandomlyWiredStage(nn.Module):
 
         if self.training:
             self.node_running_usage.mul_(1 - NN_MOMENTUM).add_(node_usage * NN_MOMENTUM)
-        self.debugger and self.debugger.check_node_embs(self.node_embs)
         self.debugger and self.debugger.check_node_norm(self.nn_centering_mode, self.nn_affine_mode,
-                                                        self.nn_running_mean, self.nn_running_var,
+                                                        self.nn_running_mean, self.nn_running_std,
                                                         self.nn_gamma, self.nn_beta,
                                                         self.e2vv)
         self.debugger and self.debugger.after_forward()
@@ -256,36 +258,43 @@ class RandomlyWiredStage(nn.Module):
                 ops[i] = transform_cls(in_channels, in_channels, in_ksize, in_stride)
         return ops
 
+    def _create_attend_ops(self, nodes, attend_cls, in_channels):
+        ops = [None] * len(nodes)
+        for i, node in enumerate(nodes[:-1]):
+            if node.n_out_neis > 1:
+                ops[i] = attend_cls(in_channels, node.n_out_neis)
+        return ops
+
     def _get_sent_attention(self, src_attn, src_nd, src_feat, batch_size):
         ''' src_feat: subbat_size x C x H x W
             src_attn: subbat_size
         '''
         tar_nd_idx = torch.tensor(src_nd.out_nei_ids, device=self.device)
         if tar_nd_idx.size(0) > 1:
-            tar_embs = self.node_embs.index_select(0, tar_nd_idx)  # n_tar_nds x emb_dims
-            attn_scores, src_emb = self.attend_op(src_feat.data, tar_embs)  # subbat_size x n_tar_nds
-            self.debugger.check_src_emb(src_nd.id, src_emb)
+            attn_scores = self.attend_op[src_nd.id](src_feat.data)  # subbat_size x n_tar_nds
+            self.debugger.check_attn_scores(src_nd.id, src_nd.out_nei_ids, attn_scores)
 
             if self.nn_centering_mode is not None:
                 idx = tar_nd_idx if self.nn_centering_mode == 'nodewise' else self._get_edge_idx(src_nd)
                 if self.training:
                     running_mean = self.nn_running_mean[idx]  # n_tar_nds
-                    running_var = self.nn_running_var[idx]  # n_tar_nds
+                    running_std = self.nn_running_std[idx]  # n_tar_nds
 
                     m = NN_MOMENTUM * attn_scores.size(0) / batch_size
                     self.nn_running_mean[idx] = running_mean * (1 - m) + attn_scores.data.mean(0) * m
-                    self.nn_running_var[idx] = running_var * (1 - m) + (attn_scores.data - running_mean).pow(2).mean(0) * m
+                    self.nn_running_std[idx] = torch.sqrt(running_std.float().pow(2) * (1 - m) +
+                                                          (attn_scores.data - running_mean).float().pow(2).mean(0) * m).to(self.dtype)
 
                 running_mean = self.nn_running_mean[idx]  # n_tar_nds
-                running_var = self.nn_running_var[idx]  # n_tar_nds
+                running_std = self.nn_running_std[idx]  # n_tar_nds
 
                 if self.nn_affine_mode is not None:
                     idx2 = tar_nd_idx if self.nn_affine_mode == 'nodewise' else self._get_edge_idx(src_nd)
                     gamma = self.nn_gamma[idx2]  # n_tar_nds
                     beta = self.nn_beta[idx2]  # n_tar_nds
-                    attn_scores = (attn_scores - running_mean) / torch.sqrt(running_var + NN_EPSILON) * gamma + beta  # subbat_size x n_tar_nds
+                    attn_scores = (attn_scores - running_mean) / (running_std + NN_EPSILON) * gamma + beta  # subbat_size x n_tar_nds
                 else:
-                    attn_scores = (attn_scores - running_mean) / torch.sqrt(running_var + NN_EPSILON)  # subbat_size x n_tar_nds
+                    attn_scores = (attn_scores - running_mean) / (running_std + NN_EPSILON)  # subbat_size x n_tar_nds
 
             transition = torch.softmax(attn_scores, 1)  # subbat_size x n_tar_nds
             attn_sent = src_attn.unsqueeze(1) * transition  # subbat_size x n_tar_nds
@@ -387,20 +396,18 @@ class ANet(nn.Module):
             elif isinstance(m, (nn.BatchNorm2d, nn.SyncBatchNorm, nn.GroupNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-            elif isinstance(m, RandomlyWiredStage):
-                nn.init.normal_(m.node_embs, std=0.01)
         self.apply(init_weights)
 
     def reduce_buffers(self, bs):
         for stage in self.stages:
             if isinstance(stage, RandomlyWiredStage):
                 if self.training:
-                    bs, r_mean, r_var, r_usage = batch_reduce(bs,
+                    bs, r_mean, r_std, r_usage = batch_reduce(bs,
                                                               stage.nn_running_mean,
-                                                              stage.nn_running_var,
+                                                              stage.nn_running_std,
                                                               stage.node_running_usage)
                     stage.nn_running_mean.copy_(r_mean)
-                    stage.nn_running_var.copy_(r_var)
+                    stage.nn_running_std.copy_(r_std)
                     stage.node_running_usage.copy_(r_usage)
 
     def get_summaries(self):

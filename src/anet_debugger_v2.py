@@ -15,7 +15,7 @@ class StageDebugger(object):
         self.node_usage = torch.zeros(self.sg.n_nodes)
         self.node_usage[0] = 1
         self.node_usage[-1] = 1
-        self.src_emb_info = {}
+        self.scores_info = {}
 
     def after_forward(self):
         momentum = 0.1
@@ -37,32 +37,30 @@ class StageDebugger(object):
 
         self.node_usage[node.id] = subbat_idx.size(0) / batch_size
 
-    def check_node_embs(self, node_embs):
-        self.node_embs_stats = []
-        node_embs = node_embs.detach().cpu().numpy()
-        for i in range(self.sg.n_nodes):
-            emb = node_embs[i]
-            mean = emb.mean()
-            var = emb.var()
-            mx = emb.max()
-            mn = emb.min()
-            l2 = np.sqrt(np.sum(np.square(emb)))
-            self.node_embs_stats.append((mean, var, mx, mn, l2))
+    def check_attn_scores(self, src_id, tar_ids, scores):
+        scores = scores.detach().cpu().float().numpy()
+        for i, tar_id in enumerate(tar_ids):
+            s = scores[:, i]
+            mean = s.mean()
+            mx = s.max()
+            mn = s.min()
+            rms = np.sqrt(np.mean(np.square(s)))
+            self.scores_info[(src_id, tar_id)] = (mean, mx, mn, rms)
 
-    def check_node_norm(self, nn_centering_mode, nn_affine_mode, nn_mean, nn_var, nn_gamma, nn_beta, e2vv):
+    def check_node_norm(self, nn_centering_mode, nn_affine_mode, nn_mean, nn_std, nn_gamma, nn_beta, e2vv):
         if nn_centering_mode == 'nodewise':
             self.nn_mean_info = ['%d(%.3f)' % (i, mean)
                                  for i, mean in enumerate(nn_mean.detach().cpu().numpy())]
-            self.nn_var_info = ['%d(%.3f)' % (i, var)
-                                 for i, var in enumerate(nn_var.detach().cpu().numpy())]
+            self.nn_std_info = ['%d(%.3f)' % (i, std)
+                                 for i, std in enumerate(nn_std.detach().cpu().numpy())]
         elif nn_centering_mode == 'edgewise':
             self.nn_mean_info = ['%d-%d(%.3f)' % (e2vv[i][0], e2vv[i][1], mean)
                                  for i, mean in enumerate(nn_mean.detach().cpu().numpy())]
-            self.nn_var_info = ['%d-%d(%.3f)' % (e2vv[i][0], e2vv[i][1], var)
-                                for i, var in enumerate(nn_var.detach().cpu().numpy())]
+            self.nn_std_info = ['%d-%d(%.3f)' % (e2vv[i][0], e2vv[i][1], std)
+                                for i, std in enumerate(nn_std.detach().cpu().numpy())]
         else:
             self.nn_mean_info = None
-            self.nn_var_info = None
+            self.nn_std_info = None
 
         if nn_affine_mode == 'nodewise':
             self.nn_gamma_info = ['%d(%.3f)' % (i, gamma)
@@ -78,28 +76,21 @@ class StageDebugger(object):
             self.nn_gamma_info = None
             self.nn_beta_info = None
 
-    def check_src_emb(self, src_id, src_emb):
-        src_emb = src_emb.detach().cpu().numpy()
-        self.src_emb_info[src_id] = [src_emb.mean(), src_emb.var(), np.mean(np.sqrt(np.sum(np.square(src_emb), 1)))]
-
     def _print(self):
         for i in self.traces:
             print('Stage_%d Idx_%d: %s' % (self.sg.id, i, ', '.join(self.traces[i])))
-        print('Stage_%d [avg usage: %.3f]:' % (self.sg.id, self.node_avg_usage) +
+        print('Stage_%d [avg_usage: %.3f]:' % (self.sg.id, self.node_avg_usage) +
               ', '.join(['%d(%.4f)' % (nd_id, usage) for nd_id, usage in enumerate(self.node_usage)]))
-        print('Stage_%d [avg running usage: %.3f]:' % (self.sg.id, self.node_avg_running_usage) +
+        print('Stage_%d [avg_running_usage: %.3f]:' % (self.sg.id, self.node_avg_running_usage) +
               ', '.join(['%d(%.4f)' % (nd_id, usage) for nd_id, usage in enumerate(self.node_running_usage)]))
-        print('Stage_%d node_embs:' % (self.sg.id) +
-              ', '.join(['%d(%.3f,%.3f,%.3f)' % (nd_id, mean, var, l2)
-                         for nd_id, (mean, var, mx, mn, l2) in enumerate(self.node_embs_stats)]))
         if self.nn_mean_info:
-            print('Stage_%d mean:' % (self.sg.id) + ', '.join(self.nn_mean_info))
-            print('Stage_%d var:' % (self.sg.id) + ', '.join(self.nn_var_info))
+            print('Stage_%d nn_mean:' % (self.sg.id) + ', '.join(self.nn_mean_info))
+            print('Stage_%d nn_std:' % (self.sg.id) + ', '.join(self.nn_std_info))
         if self.nn_gamma_info:
-            print('Stage_%d gamma:' % (self.sg.id) + ', '.join(self.nn_gamma_info))
-            print('Stage_%d beta:' % (self.sg.id) + ', '.join(self.nn_beta_info))
-        if self.src_emb_info:
-            print('Stage_%d src_emb:' % (self.sg.id) +
-                  ', '.join(['%d(%.3f,%.3f,%.3f)' % (nd_id, mean, var, l2)
-                             for nd_id, (mean, var, l2) in self.src_emb_info.items()]))
+            print('Stage_%d nn_gamma:' % (self.sg.id) + ', '.join(self.nn_gamma_info))
+            print('Stage_%d nn_beta:' % (self.sg.id) + ', '.join(self.nn_beta_info))
+        if self.scores_info:
+            print('Stage_%d attn_scores:' % (self.sg.id) +
+                  ', '.join(['%d-%d(%.3f,%.3f,%.3f,%.3f)' % (src_id, tar_id, mean, mx, mn, rms)
+                             for (src_id, tar_id), (mean, mx, mn, rms) in self.scores_info.items()]))
         print()

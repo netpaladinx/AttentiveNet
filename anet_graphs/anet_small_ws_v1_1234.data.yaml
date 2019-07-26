@@ -36,7 +36,7 @@ graph:
     transform: transform_relu_sepconv_bn
     type: singleton
   - _stage: 3
-    attend: attend_relu_conv_bn_relu_avgpool_dot
+    attend: attend_
     edges:
       - !!python/tuple
         - 1
@@ -253,12 +253,12 @@ graph:
       - 32
     rw_graph: watts_strogatz
     seed: 57767
-    transform: transform_relu_sepconv_bn
+    transform: transform_relu_sepconv_gn
     type: randomly_wired
     ws_k: 4
     ws_p: 0.75
   - _stage: 4
-    attend: attend_relu_conv_bn_relu_avgpool_dot
+    attend: attend_
     edges:
       - !!python/tuple
         - 1
@@ -472,12 +472,12 @@ graph:
       - 32
     rw_graph: watts_strogatz
     seed: 15315
-    transform: transform_relu_sepconv_bn
+    transform: transform_relu_sepconv_gn
     type: randomly_wired
     ws_k: 4
     ws_p: 0.75
   - _stage: 5
-    attend: attend_relu_conv_bn_relu_avgpool_dot
+    attend: attend_
     edges:
       - !!python/tuple
         - 1
@@ -682,8 +682,8 @@ graph:
       - 8
       - 13
     n_internal_nodes: 32
-    out_channels: 1280
-    out_kernel_size: 1
+    out_channels: 312
+    out_kernel_size: 3
     out_stride: 1
     outputs:
       - 21
@@ -693,11 +693,23 @@ graph:
       - 32
     rw_graph: watts_strogatz
     seed: 981
-    transform: transform_relu_sepconv_bn
+    transform: transform_relu_sepconv_gn
     type: randomly_wired
     ws_k: 4
     ws_p: 0.75
   - _stage: 6
+    in_channels: 312
+    inputs:
+      - 1
+    kernel_size: 1
+    n_internal_nodes: 1
+    out_channels: 1280
+    outputs:
+      - 1
+    stride: 1
+    transform: transform_relu_sepconv_bn
+    type: singleton
+  - _stage: 7
     in_channels: 1280
     inputs:
       - 1

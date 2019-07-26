@@ -34,8 +34,8 @@ graph:
     in_stride: 1
     out_kernel_size: 3
     out_stride: 2
-    transform: transform_relu_sepconv_bn
-    attend: attend_relu_conv_bn_relu_avgpool_dot
+    transform: transform_relu_sepconv_gn
+    attend: attend_
   - _stage: 4
     type: randomly_wired
     n_internal_nodes: 32
@@ -48,8 +48,8 @@ graph:
     in_stride: 1
     out_kernel_size: 3
     out_stride: 2
-    transform: transform_relu_sepconv_bn
-    attend: attend_relu_conv_bn_relu_avgpool_dot
+    transform: transform_relu_sepconv_gn
+    attend: attend_
   - _stage: 5
     type: randomly_wired
     n_internal_nodes: 32
@@ -57,14 +57,21 @@ graph:
     ws_k: 4
     ws_p: 0.75
     in_channels: 312
-    out_channels: 1280
+    out_channels: 312
     in_kernel_size: 3
     in_stride: 1
-    out_kernel_size: 1
+    out_kernel_size: 3
     out_stride: 1
-    transform: transform_relu_sepconv_bn
-    attend: attend_relu_conv_bn_relu_avgpool_dot
+    transform: transform_relu_sepconv_gn
+    attend: attend_
   - _stage: 6
+    type: singleton
+    in_channels: 312
+    out_channels: 1280
+    kernel_size: 1
+    stride: 1
+    transform: transform_relu_sepconv_bn
+  - _stage: 7
     type: singleton
     in_channels: 1280
     out_channels: 1001
