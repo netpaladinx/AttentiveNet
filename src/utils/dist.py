@@ -2,11 +2,17 @@ import torch.distributed as dist
 
 
 def batch_reduce(bs, *tensors):
-    tensors = [t.clone().detach().mul_(bs) for t in tensors]
+    bs = bs.detach().clone()
+    tensors = [t.detach().clone().mul_(bs) for t in tensors]
 
-    dist.all_reduce(bs, op=dist.ReduceOp.SUM)
+    bs_handle = dist.all_reduce(bs, op=dist.ReduceOp.SUM, async_op=True)
+    handles = []
     for t in tensors:
-        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        handles.append(dist.all_reduce(t, op=dist.ReduceOp.SUM, async_op=True))
+
+    bs_handle.wait()
+    for h in handles:
+        h.wait()
 
     tensors = [t.div_(bs) for t in tensors]
     return [bs] + tensors

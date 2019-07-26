@@ -242,5 +242,5 @@ class ANetGraph(object):
 
 
 if __name__ == '__main__':
-    anet_graph = ANetGraph('anet_small_ws_1234')
+    anet_graph = ANetGraph('anet_small_ws_v1_1234')
     anet_graph.draw_graph()

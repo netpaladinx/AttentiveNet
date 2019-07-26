@@ -5,11 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from anet_graphs_v1 import ANetGraph
-
+from anet_debugger_v1 import StageDebugger
+from utils.dist import batch_reduce
 
 BN_MOMENTUM = 0.01
 NN_MOMENTUM = 0.1
 NN_EPSILON = 1e-5
+
 
 def separable_conv2d(in_planes, out_planes, kernel_size, stride):
     if kernel_size > 1:
@@ -122,7 +124,11 @@ attend_relu_conv_bn_relu_avgpool_dot = Attend_ReluConvBnReluAvgpoolDot
 
 
 class RandomlyWiredStage(nn.Module):
-    def __init__(self, stage_graph, attend_k, attend_epsilon, node_emb_dims, device, dtype):
+    def __init__(self, stage_graph, attend_k, attend_epsilon, node_emb_dims, device, dtype,
+                 nn_affine_mode, nn_centering_mode, print_freq, debug):
+        ''' nn_affine_mode: None, 'nodewise', or 'edgewise'
+            nn_centering_mode: None, 'node_wise', or 'edgewise'
+        '''
         super(RandomlyWiredStage, self).__init__()
         self.sg = stage_graph
         self.k = attend_k
@@ -130,13 +136,29 @@ class RandomlyWiredStage(nn.Module):
         self.emb_dims = node_emb_dims
         self.device = device
         self.dtype = dtype
+        self.debugger = StageDebugger(self.sg, eg_ids=(0,), print_freq=print_freq) if debug else None
+        self.nn_affine_mode = nn_affine_mode
+        self.nn_centering_mode = nn_centering_mode
+
+        self.e2vv = [(src_nd.id, tar_id) for src_nd in self.sg.nodes for tar_id in src_nd.out_nei_ids]
+        self.vv2e = {vv: i for i, vv in enumerate(self.e2vv)}
 
         self.node_embs = nn.Parameter(torch.randn(self.sg.n_nodes, self.emb_dims))
-        self.node_gamma = nn.Parameter(torch.ones(self.sg.n_nodes))
-        self.node_beta = nn.Parameter(torch.zeros(self.sg.n_nodes))
 
-        self.register_buffer('node_running_mean', torch.zeros(self.sg.n_nodes))
-        self.register_buffer('node_running_var', torch.ones(self.sg.n_nodes))
+        if nn_affine_mode == 'nodewise':
+            self.nn_gamma = nn.Parameter(torch.ones(self.sg.n_nodes))
+            self.nn_beta = nn.Parameter(torch.zeros(self.sg.n_nodes))
+        elif nn_affine_mode == 'edgewise':
+            self.nn_gamma = nn.Parameter(torch.ones(len(self.vv2e)))
+            self.nn_beta = nn.Parameter(torch.zeros(len(self.vv2e)))
+
+        if nn_centering_mode == 'nodewise':
+            self.register_buffer('nn_running_mean', torch.zeros(self.sg.n_nodes))
+            self.register_buffer('nn_running_var', torch.ones(self.sg.n_nodes))
+        elif nn_centering_mode == 'edgewise':
+            self.register_buffer('nn_running_mean', torch.zeros(len(self.vv2e)))
+            self.register_buffer('nn_running_var', torch.ones(len(self.vv2e)))
+
         self.register_buffer('node_running_usage', torch.zeros(self.sg.n_nodes))
 
         transform_cls = getattr(sys.modules[__name__], self.sg.transform)
@@ -148,38 +170,8 @@ class RandomlyWiredStage(nn.Module):
                                        self.sg.out_channels, self.sg.out_kernel_size, self.sg.out_stride))
         self.attend_op = attend_cls(self.sg.in_channels, self.emb_dims)
 
-    def _debug_begin(self):
-        self._idx_traces = {0: [], 5: [], 10: []}
-
-    def _debug_after_transform(self, node, subbat_idx, node_a, trans_m):
-        for i in self._idx_traces:
-            if subbat_idx.eq(i).any():
-                trace = [node.id, node_a[i].item()]
-                src_info = []
-                for src_id in trans_m:
-                    m = trans_m[src_id][i].item()
-                    if m == 1:
-                        src_info.append('%d' % (src_id))
-                src_info = ','.join(src_info)
-                self._idx_traces[i].append(trace + [src_info])
-
-    def _debug_end(self):
-        self._node_avg_usage = self.node_running_usage.mean().item()
-
-    def _debug_print(self):
-        if self.sg.id == 2:
-            for i in self._idx_traces:
-                #print('idx%d: ' % i +
-                #      ', '.join(['%d[%.2f<-%s]' % (nd_id, nd_a, src)
-                #                 for nd_id, nd_a, src in self._idx_traces[i]]))
-                print('idx%d: ' % i +
-                      ', '.join(['%d[%.2f<-%s]' % (nd_id, nd_a, src) for nd_id, nd_a, src in self._idx_traces[i]]))
-            print('Stage_%d [avg usage: %.4f] - ' % (self.sg.id, self._node_avg_usage) +
-                  ', '.join(['%d: %.4f' % (nd_id, usage) for nd_id, usage in enumerate(self.node_running_usage)]))
-            print()
-
     def forward(self, x):
-        self._debug_begin()
+        self.debugger and self.debugger.before_forward()
 
         node_outs = [None] * self.sg.n_nodes
         node_attns = [None] * self.sg.n_nodes
@@ -191,31 +183,33 @@ class RandomlyWiredStage(nn.Module):
 
         node = self.sg.master_input
         node_outs[node.id] = (x, torch.arange(batch_size, device=self.device))  # x: batch_size x C x H x W
+        node_attns[node.id] = torch.ones(batch_size, device=self.device, dtype=self.dtype)
         node_usage[node.id] = 1
 
-        tar_nd_idx, attn_sent = self._get_sent_attention(None, node, x, batch_size)  # attn_sent: batch_size x n_tar_nds
+        tar_nd_idx, attn_sent = self._get_sent_attention(node_attns[node.id], node, x, batch_size)  # attn_sent: batch_size x n_tar_nds
         attn_dist = torch.zeros(batch_size, self.sg.n_nodes, device=self.device, dtype=self.dtype)  # batch_size x n_nodes
         attn_dist.index_copy_(1, tar_nd_idx, attn_sent.data)
         attn_dist, mask, scale = self._cut_attended_area(attn_dist)
 
         for tar_id, a_sent in zip(node.out_nei_ids, attn_sent.unbind(dim=1)):
             m = mask.index_select(1, torch.tensor(tar_id, device=self.device)).squeeze(1)
-            node_attns[tar_id] = a_sent * m * scale  # batch_size
-            trans_mask[tar_id][node.id] = m
+            node_attns[tar_id] = a_sent * (m * scale)
+            trans_mask[tar_id][node.id] = m.clone()
 
         # for the rest nodes
 
         stage_out = None
         for node in self.sg.nodes[1:]:
-            aggr_x, subbat_idx = self._aggregate_node_inputs(node_outs, node_attns, trans_mask[node.id], batch_size, node.id)
+            aggr_x, subbat_idx = self._aggregate_node_inputs(node_outs, node_attns, trans_mask[node.id], batch_size)
             if aggr_x is None:
                 continue
 
-            self._debug_after_transform(node, subbat_idx, node_attns[node.id], trans_mask[node.id])
             node_usage[node.id] = subbat_idx.size(0) / batch_size
+            self.debugger and self.debugger.after_node_aggregate_op(
+                node, subbat_idx, node_attns[node.id], trans_mask[node.id], batch_size)
 
             if node.is_master_output:
-                stage_out = aggr_x
+                stage_out = aggr_x / node.n_in_neis
                 assert stage_out.size(0) == batch_size
                 break
 
@@ -231,21 +225,24 @@ class RandomlyWiredStage(nn.Module):
 
             for tar_id, a_sent in zip(node.out_nei_ids, attn_sent.unbind(dim=1)):  # a_sent: batch_size
                 node_attns[tar_id] = a_sent if node_attns[tar_id] is None else node_attns[tar_id] + a_sent
-                trans_mask[tar_id][node.id] = torch.ones_like(a_sent, device=self.device, dtype=self.dtype)
-
+                trans_mask[tar_id][node.id] = a_sent.data.ne(0).to(self.dtype)
 
             for tar_id in range(node.id + 1, self.sg.n_nodes):
                 if node_attns[tar_id] is None:
                     continue
                 m = mask.index_select(1, torch.tensor(tar_id, device=self.device)).squeeze(1)
-                node_attns[tar_id] = node_attns[tar_id] * m * scale
+                node_attns[tar_id] = node_attns[tar_id] * (m * scale)
                 for src_id in trans_mask[tar_id]:
                     trans_mask[tar_id][src_id].mul_(m)
 
-        self.node_running_usage.mul_(1 - NN_MOMENTUM).add_(node_usage * NN_MOMENTUM)
-
-        self._debug_end()
-        self._debug_print()
+        if self.training:
+            self.node_running_usage.mul_(1 - NN_MOMENTUM).add_(node_usage * NN_MOMENTUM)
+        self.debugger and self.debugger.check_node_embs(self.node_embs)
+        self.debugger and self.debugger.check_node_norm(self.nn_centering_mode, self.nn_affine_mode,
+                                                        self.nn_running_mean, self.nn_running_var,
+                                                        self.nn_gamma, self.nn_beta,
+                                                        self.e2vv)
+        self.debugger and self.debugger.after_forward()
         assert stage_out is not None
         return stage_out
 
@@ -268,58 +265,67 @@ class RandomlyWiredStage(nn.Module):
             tar_embs = self.node_embs.index_select(0, tar_nd_idx)  # n_tar_nds x emb_dims
             attn_scores = self.attend_op(src_feat.data, tar_embs)  # subbat_size x n_tar_nds
 
-            running_mean = self.node_running_mean[tar_nd_idx]  # n_tar_nds
-            running_var = self.node_running_var[tar_nd_idx]  # n_tar_nds
+            if self.nn_centering_mode is not None:
+                idx = tar_nd_idx if self.nn_centering_mode == 'nodewise' else self._get_edge_idx(src_nd)
+                if self.training:
+                    running_mean = self.nn_running_mean[idx]  # n_tar_nds
+                    running_var = self.nn_running_var[idx]  # n_tar_nds
 
-            m = NN_MOMENTUM * attn_scores.size(0) / batch_size
-            self.node_running_mean[tar_nd_idx] = running_mean * (1 - m) + attn_scores.data.mean(0) * m
-            self.node_running_var[tar_nd_idx] = running_var * (1 - m) + (attn_scores.data - running_mean).pow(2).mean(0) * m
+                    m = NN_MOMENTUM * attn_scores.size(0) / batch_size
+                    self.nn_running_mean[idx] = running_mean * (1 - m) + attn_scores.data.mean(0) * m
+                    self.nn_running_var[idx] = running_var * (1 - m) + (attn_scores.data - running_mean).pow(2).mean(0) * m
 
-            running_mean = self.node_running_mean[tar_nd_idx]  # n_tar_nds
-            running_var = self.node_running_var[tar_nd_idx]  # n_tar_nds
-            gamma = self.node_gamma[tar_nd_idx]  # n_tar_nds
-            beta = self.node_beta[tar_nd_idx]  # n_tar_nds
+                running_mean = self.nn_running_mean[idx]  # n_tar_nds
+                running_var = self.nn_running_var[idx]  # n_tar_nds
 
-            attn_scores = (attn_scores - running_mean) / torch.sqrt(running_var + NN_EPSILON) * gamma + beta  # subbat_size x n_tar_nds
+                if self.nn_affine_mode is not None:
+                    idx2 = tar_nd_idx if self.nn_affine_mode == 'nodewise' else self._get_edge_idx(src_nd)
+                    gamma = self.nn_gamma[idx2]  # n_tar_nds
+                    beta = self.nn_beta[idx2]  # n_tar_nds
+                    attn_scores = (attn_scores - running_mean) / torch.sqrt(running_var + NN_EPSILON) * gamma + beta  # subbat_size x n_tar_nds
+                else:
+                    attn_scores = (attn_scores - running_mean) / torch.sqrt(running_var + NN_EPSILON)  # subbat_size x n_tar_nds
+
             transition = torch.softmax(attn_scores, 1)  # subbat_size x n_tar_nds
-            attn_sent = transition if src_attn is None else src_attn.unsqueeze(1) * transition  # subbat_size x n_tar_nds
+            attn_sent = src_attn.unsqueeze(1) * transition  # subbat_size x n_tar_nds
             return tar_nd_idx, attn_sent
         else:
-            return tar_nd_idx, src_attn if src_attn is None else src_attn.unsqueeze(1)  # subbat_size x n_tar_nds (=1)
+            return tar_nd_idx, src_attn.unsqueeze(1)  # subbat_size x n_tar_nds (=1)
 
+    def _get_edge_idx(self, src_nd):
+        return torch.tensor([self.vv2e[(src_nd.id, tar_id)] for tar_id in src_nd.out_nei_ids], device=self.device)
 
     def _cut_attended_area(self, attn_dist):
         V, I = attn_dist.topk(self.k)
-        mask = torch.zeros_like(attn_dist, device=self.device, dtype=self.dtype)  # batch_size x n_nodes
-        mask.scatter_(1, I, torch.ones(I.size(), device=self.device, dtype=self.dtype))
-        mask_gt = torch.gt(attn_dist, self.epsilon).float()
+        mask = torch.zeros_like(attn_dist, device=self.device, dtype=self.dtype).scatter_(
+            1, I, torch.ones(I.size(), device=self.device, dtype=self.dtype))  # batch_size x n_nodes
+        mask_gt = torch.gt(attn_dist, self.epsilon).to(self.dtype)
         mask.mul_(mask_gt)
-        V_gt = torch.gt(V, self.epsilon).float()
+        V_gt = torch.gt(V, self.epsilon).to(self.dtype)
         V.mul_(V_gt)  # batch_size x k
         scale = 1 / V.sum(1)  # batch_size
         attn_dist.mul_(mask).mul_(scale.unsqueeze(1))
         return attn_dist, mask, scale
 
-    def _aggregate_node_inputs(self, node_outs, node_attns, trans_m, batch_size, nd_id):
+    def _aggregate_node_inputs(self, node_outs, node_attns, trans_m, batch_size):
         x = None
         for src_id in trans_m:
             out, subb_idx = node_outs[src_id]  # out: subbat_size x C x H x W, subb_idx: subbat_size
             subb_idx2 = trans_m[src_id][subb_idx].nonzero().squeeze(1)  # subb_idx2: subsubbat_size
             if subb_idx2.size(0) == 0:
                 continue
-            out = out.index_select(0, subb_idx2)  # sub
+            out = out.index_select(0, subb_idx2)  # subsubbat_size x C x H x W
 
             attn = node_attns[src_id]  # batch_size
             if attn is not None:
-                wei = attn[subb_idx[subb_idx2]]
-                out = out * wei.reshape(wei.size(0), 1, 1, 1)
+                wei = attn[subb_idx[subb_idx2]].view(-1, 1, 1, 1)
+                out = out * wei
 
             _, C, H, W = out.size()
             sp_out = torch.sparse_coo_tensor(subb_idx[subb_idx2].unsqueeze(0), out,
                                              torch.Size([batch_size, C, H, W]))
             x = sp_out if x is None else x + sp_out
         if x is not None:
-            print(self.sg.id, nd_id)
             x = x.coalesce()
             aggr_x = x.values()
             subbat_idx = x.indices().squeeze(0)
@@ -347,16 +353,21 @@ class SingletonStage(nn.Module):
 
 
 class ANet(nn.Module):
-    def __init__(self, graph, attend_k, attend_epsilon, node_emb_dims, device, dtype):
+    def __init__(self, graph, attend_k, attend_epsilon, node_emb_dims, device, dtype,
+                 nn_affine_mode, nn_centering_mode, print_freq, debug):
         super(ANet, self).__init__()
         self.graph = ANetGraph(graph)
+        self.debug = debug
 
         stages = []
         for i, stage_graph in enumerate(self.graph.stage_graphs):
             if stage_graph.type == 'singleton':
                 stage = SingletonStage(stage_graph)
             elif stage_graph.type == 'randomly_wired':
-                stage = RandomlyWiredStage(stage_graph, attend_k, attend_epsilon, node_emb_dims, device, dtype)
+                stage = RandomlyWiredStage(stage_graph, attend_k, attend_epsilon, node_emb_dims, device, dtype,
+                                           nn_affine_mode, nn_centering_mode, print_freq, debug)
+            else:
+                raise ValueError('Invalid `stage_graph.type`')
             stages.append(stage)
 
         self.stages = nn.ModuleList(stages)
@@ -366,7 +377,6 @@ class ANet(nn.Module):
         out = x
         for stage in self.stages:
             out = stage(out)
-        print('out')
         return out
 
     def _initialize(self):
@@ -380,13 +390,27 @@ class ANet(nn.Module):
                 nn.init.normal_(m.node_embs, std=0.01)
         self.apply(init_weights)
 
+    def reduce_buffers(self, bs):
+        for stage in self.stages:
+            if isinstance(stage, RandomlyWiredStage):
+                if self.training:
+                    bs, r_mean, r_var, r_usage = batch_reduce(bs,
+                                                              stage.nn_running_mean,
+                                                              stage.nn_running_var,
+                                                              stage.node_running_usage)
+                    stage.nn_running_mean.copy_(r_mean)
+                    stage.nn_running_var.copy_(r_var)
+                    stage.node_running_usage.copy_(r_usage)
+
     def get_summaries(self):
         summaries = []
         for stage in self.stages:
             if isinstance(stage, RandomlyWiredStage):
                 stage_id = stage.sg.id
-                node_usage = stage.node_usage
-                summaries.append(('stage_%d' % stage_id, node_usage))
+                node_usage = stage.node_running_usage
+                name = 'stage %d, node_usage(%.4f)' % (stage_id, node_usage.mean().item())
+                value_str = ', '.join(['%d(%.4f)' % (nd_id, usage) for nd_id, usage in enumerate(node_usage)])
+                summaries.append((name, value_str, '\n'))
         return summaries
 
 
@@ -398,4 +422,8 @@ def anet_small_ws_v1(hparams, use_cuda=False, use_fp16=False):
                 hparams.attend_epsilon,
                 hparams.node_emb_dims,
                 device,
-                dtype)
+                dtype,
+                hparams.nn_affine_mode,
+                hparams.nn_centering_mode,
+                hparams.print_freq,
+                hparams.debug)

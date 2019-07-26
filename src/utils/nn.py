@@ -49,9 +49,9 @@ def get_parameters(model, include=None, exclude=None, clone=False):
 
 def copy_grads(params_src, params_dst):
     for p_src, p_dst in zip(params_src, params_dst):
-        if p_dst.grad is None:
-            p_dst.grad = p_dst.data.clone()
-        p_dst.grad.data.copy_(p_src.grad.data)
+        p_dst.grad = torch.zeros_like(p_dst.data)
+        if p_src.grad is not None:
+            p_dst.grad.data.copy_(p_src.grad.data)
 
 
 def copy_params(params_src, params_dst):

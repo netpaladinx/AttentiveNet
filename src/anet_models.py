@@ -193,7 +193,7 @@ class RandomlyWiredStage(nn.Module):
         stage_out = None
         for node in self.sg.nodes[1:]:
             aggr_x, subbat_idx = self._aggregate_node_inputs(node_outs, trans_attns[node.id],
-                                                             trans_norm_factors[node.id], batch_size)
+                                                             trans_norm_factors[node.id], batch_size, node.id, node_attns)
             if aggr_x is None:
                 continue
 
@@ -276,7 +276,7 @@ class RandomlyWiredStage(nn.Module):
         attn_dist.mul_(mask).mul_(scale.unsqueeze(1))
         return attn_dist, mask, scale
 
-    def _aggregate_node_inputs(self, node_outs, trans_a, trans_nf, batch_size):
+    def _aggregate_node_inputs(self, node_outs, trans_a, trans_nf, batch_size, nd_id, node_attns):
         x = None
         for src_id in trans_a:
             tr_a = trans_a[src_id] * trans_nf[src_id]
@@ -285,13 +285,15 @@ class RandomlyWiredStage(nn.Module):
             if subb_idx2.size(0) == 0:
                 continue
             out = out.index_select(0, subb_idx2)
-            w = self.a2w_op(tr_a[subb_idx][subb_idx2])
+            #w = self.a2w_op(tr_a[subb_idx][subb_idx2]).view(-1, 1, 1, 1)
+            w = 1 if node_attns[src_id] is None else node_attns[src_id][subb_idx][subb_idx2].view(-1, 1, 1, 1)
             _, C, H, W = out.size()
             sp_out = torch.sparse_coo_tensor(subb_idx[subb_idx2].unsqueeze(0),
-                                             out * w.view(w.size(0), 1, 1, 1),
+                                             out * w,
                                              torch.Size([batch_size, C, H, W]))
             x = sp_out if x is None else x + sp_out
         if x is not None:
+            print(self.sg.id, nd_id)
             x = x.coalesce()
             aggr_x = x.values()
             subbat_idx = x.indices().squeeze(0)

@@ -64,16 +64,14 @@ class Logger(object):
         self.metric_file_handler.flush()
 
     def log_summaries(self, summaries, epoch, step, mode):
-        ''' summaries: [(name, value), ...]
+        ''' summaries: [(name, value_str, sep), ...]
             mode: 'train' or 'val'
         '''
-        smr = OrderedDict(
-            [('mode', mode), ('epoch', epoch), ('step', step)] +
-            [(name, float(value)) for name, value in summaries] +
-            [('timestamp', datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"))]
-        )
-        json.dump(smr, self.summary_file_handler)
-        self.summary_file_handler.write('\n')
+        smr = 'mode: %s, epoch: %d, step: %d, timestep: %s\n' % (
+            mode, epoch, step, datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+        for name, value_str, sep in summaries:
+            smr = smr + name + ': ' + value_str + sep
+        self.summary_file_handler.write(smr+'\n')
         self.summary_file_handler.flush()
 
     def log_run_info(self):

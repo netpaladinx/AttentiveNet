@@ -27,12 +27,12 @@ EXPERIMENT_ID = '{}_{}'.format(MODEL_NAME, datetime.datetime.utcnow().strftime("
 
 
 def define_args():
-    parser = argparse.ArgumentParser(description='anet_main')
+    parser = argparse.ArgumentParser(description='anet_main_v1')
     parser.add_argument('--model_name', default=MODEL_NAME, type=str, help='model_name')
     parser.add_argument('--experiment_id', default=EXPERIMENT_ID, type=str, help='experiment_id')
     parser.add_argument('--config_file', default='../config/{}_hparams.yaml'.format(MODEL_NAME), type=str, help='config_file')
     parser.add_argument('--checkpoint', default='', type=str, help='checkpoint')
-    parser.add_argument('--local_debug', default=True, action='store_true', help='local_debug')
+    parser.add_argument('--local_debug', default=False, action='store_true', help='local_debug')
     parser.add_argument('--save_model', default=False, action='store_true', help='save_model')
     parser.add_argument('--lr_scheduler', default='cosine_annealing_warm_restarts', type=str, help='lr_scheduler')
     return parser.parse_args()
@@ -50,9 +50,11 @@ def set_hparams(hparams):
                                               hparams.world_size - 1) // hparams.world_size
         else:
             hparams.distributed_mode = 'gpu'
+            hparams.n_data_loading_workers = 6
     else:
         hparams.world_size = 1
         hparams.distributed_mode = 'cpu'
+        hparams.n_data_loading_workers = 6
         hparams.fp16 = False
 
     hparams.global_batch_size = hparams.per_replica_batch_size * hparams.world_size
@@ -74,11 +76,14 @@ def set_hparams(hparams):
 
     hparams.attend_k = 5
     hparams.attend_epsilon = 0.0
-    hparams.node_emb_dims = 10
+    hparams.node_emb_dims = 32
+    hparams.nn_centering_mode = 'edgewise'
+    hparams.nn_affine_mode = 'edgewise'
+    hparams.debug = False
 
     if hparams.local_debug:
-        hparams.per_replica_batch_size = 64
-        hparams.print_freq = 1
+        hparams.per_replica_batch_size = 256
+        hparams.print_freq = 10
         hparams.n_classes = 12
         hparams.n_train_images = 14300
         hparams.n_valid_images = 172
@@ -90,7 +95,7 @@ def run(cur_gpu, hparams):
 
     if cur_gpu >= 0:
         torch.cuda.set_device(cur_gpu)
-        model = getattr(models, hparams.model_name)(hparams, use_cuda=True)
+        model = getattr(models, hparams.model_name)(hparams, use_cuda=True, use_fp16=hparams.fp16)
         model.cuda()
     else:
         model = getattr(models, hparams.model_name)(hparams)
@@ -138,6 +143,8 @@ def run(cur_gpu, hparams):
 
     monitor = get_monitor()
     for epoch in range(start_epoch, hparams.epochs):
+        if cur_gpu == -1 or cur_gpu == 0:
+            print('Epoch %d\n' % (epoch + 1))
         monitor and monitor.before_epoch()
 
         if train_sampler:
@@ -170,6 +177,8 @@ def train(cur_gpu, train_loader, model, criterion, optimizer, lr_scheduler,
         acc1_meter = AverageMeter('train_acc1')
         acc5_meter = AverageMeter('train_acc5')
 
+    model_module = model.module if hparams.distributed_mode == 'gpus' else model
+
     for i, (image, target) in enumerate(train_loader):
         monitor and monitor.before_step()
 
@@ -191,6 +200,7 @@ def train(cur_gpu, train_loader, model, criterion, optimizer, lr_scheduler,
         bs = torch.tensor(image.size(0), device='cuda:%d' % cur_gpu if cur_gpu >= 0 else None)
 
         if hparams.distributed_mode == 'gpus':
+            model_module.reduce_buffers(bs)
             bs, loss_, acc1, acc5 = batch_reduce(bs, loss_, acc1, acc5)
 
         if logger:
@@ -224,6 +234,7 @@ def train(cur_gpu, train_loader, model, criterion, optimizer, lr_scheduler,
 
             # epoch: zero-indexed for code, one-indexed for human reader
             logger.log_metrics(metrics, epoch + 1, step, 'train')
+            logger.log_summaries(model_module.get_summaries(), epoch + 1, step, 'train')
 
         monitor and monitor.after_step(str(loss_meter))
 
@@ -233,6 +244,7 @@ def train(cur_gpu, train_loader, model, criterion, optimizer, lr_scheduler,
                    ('train_acc5', acc5_meter.result),
                    ('lr', optimizer.param_groups[0]['lr'])]
         logger.log_metrics(metrics, epoch + 1, step, 'train')
+        logger.log_summaries(model_module.get_summaries(), epoch + 1, step, 'train')
 
 
 def validate(cur_gpu, val_loader, model, criterion, epoch, hparams):
@@ -243,6 +255,8 @@ def validate(cur_gpu, val_loader, model, criterion, epoch, hparams):
         loss_meter = AverageMeter('val_loss')
         acc1_meter = AverageMeter('val_acc1')
         acc5_meter = AverageMeter('val_acc5')
+
+    model_module = model.module if hparams.distributed_mode == 'gpus' else model
 
     for i, (image, target) in enumerate(val_loader):
         with torch.no_grad():
@@ -276,6 +290,7 @@ def validate(cur_gpu, val_loader, model, criterion, epoch, hparams):
                    ('val_acc1', acc1_meter.result),
                    ('val_acc5', acc5_meter.result)]
         logger.log_metrics(metrics, epoch + 1, 0, 'val')
+        logger.log_summaries(model_module.get_summaries(), epoch + 1, 0, 'val')
         loss, acc1, acc5 = loss_meter.result, acc1_meter.result, acc5_meter.result
     return loss, acc1, acc5
 
